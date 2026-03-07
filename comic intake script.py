@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import pandas as pd
 import csv
 from datetime import datetime
 import io
@@ -8,180 +9,170 @@ import io
 UPCITEMDB_BASE_URL = "https://api.upcitemdb.com/prod/trial"
 
 def parse_supplement(full_barcode):
-    """Parse 5-digit supplement: issue (3 digits), variant (1), printing (1)"""
     if len(full_barcode) == 17 and full_barcode.isdigit():
         supplement = full_barcode[-5:]
-        issue_number = supplement[:3]
-        variant = supplement[3]
-        printing = supplement[4]
-        return issue_number, variant, printing
+        return supplement[:3], supplement[3], supplement[4]
     return "N/A", "N/A", "N/A"
 
 def lookup_comic(barcode):
-    """Lookup barcode via UPCitemdb using only the base 12-digit UPC"""
     try:
-        upc_12 = barcode[:12]  # Critical: use only first 12 digits
+        upc_12 = barcode[:12]
         response = requests.get(f"{UPCITEMDB_BASE_URL}/lookup?upc={upc_12}", timeout=10)
         response.raise_for_status()
         data = response.json()
-        
         if data.get('code') == 'OK' and data.get('items'):
             item = data['items'][0]
             return {
-                'title': item.get('title', "N/A"),
-                'description': item.get('description', "No description available."),
-                'publisher': item.get('brand', "N/A"),  # Often publisher for comics
-                'image_url': item.get('images', [None])[0] or "N/A",
-                'category': item.get('category', "N/A")
+                'title': item.get('title', "Unknown"),
+                'description': item.get('description', "N/A"),
+                'publisher': item.get('brand', "N/A"),
+                'image_url': item.get('images', [None])[0] or "N/A"
             }
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 400:
-            st.warning(f"Invalid UPC format or not found in UPCitemdb for base UPC {upc_12}.")
-        else:
-            st.warning(f"UPC lookup error for {barcode}: {str(e)}")
     except Exception as e:
-        st.warning(f"UPC lookup error for {barcode}: {str(e)}")
+        st.warning(f"Lookup failed for {barcode}: {str(e)}")
     return None
 
-def get_current_value(title, issue_number):
-    """Manual current value input with helpful sold/comics site links"""
-    search_title = title.replace(" ", "+") + "+" + issue_number if issue_number != "N/A" else title.replace(" ", "+")
-    
-    st.markdown(f"""
-    **Quick check for current value of '{title} #{issue_number}' (open in new tab):**
-    - [eBay Sold Listings](https://www.ebay.com/sch/i.html?_nkw={search_title}&_sacat=0&LH_Sold=1&LH_Complete=1&rt=nc&LH_ItemCondition=3000) — filter 'Sold Items' for recent prices
-    - [GoCollect Comics](https://gocollect.com/comics/search?q={search_title})
-    - [ComicBookRealm Price Guide](https://comicbookrealm.com/search?terms={search_title})
-    - [ComicsPriceGuide](https://www.comicspriceguide.com/search?query={search_title})
-    - [Key Collector Comics](https://keycollectorcomics.com/search?query={search_title})
-    """)
+def get_value_lookup_links(title, issue):
+    search = f"{title.replace(' ', '+')}+{issue}" if issue != "N/A" else title.replace(' ', '+')
+    return f"""
+    [eBay Sold](https://www.ebay.com/sch/i.html?_nkw={search}&LH_Sold=1&LH_Complete=1) ·
+    [GoCollect](https://gocollect.com/comics/search?q={search}) ·
+    [ComicBookRealm](https://comicbookrealm.com/search?terms={search})
+    """
 
-    value_input = st.text_input(
-        f"Enter current market value for '{title} #{issue_number}' (e.g. 12.50 or N/A):",
-        value="N/A",
-        key=f"value_{title}_{issue_number}_{datetime.now().timestamp()}"  # unique per run
-    )
-    
-    try:
-        return float(value_input) if value_input.strip().lower() != "n/a" else "N/A"
-    except ValueError:
-        return "N/A"
+# ────────────────────────────────────────────────
+# Main App
+# ────────────────────────────────────────────────
+st.title("Comic Intake App – Batch Table Style")
 
-def main():
-    st.title("Comic Barcode Intake App")
-    st.markdown("""
-    Enter 17-digit comic barcodes below.  
-    • Uses UPCitemdb (free tier) to look up the base 12-digit UPC  
-    • Parses the 5-digit supplement for issue/variant/printing  
-    • Manual current value input (with eBay sold & price guide links)  
-    • Downloads CSV ready for Magento import
-    """)
+vendor_id = st.text_input("Vendor ID", value=st.session_state.get("vendor_id", ""), key="vendor_id_input")
+condition = st.selectbox("Default Condition", ["New", "Near Mint", "Very Fine", "Fine", "Very Good", "Good", "Fair", "Poor", "Other"])
+msrp_default = st.number_input("Default MSRP", min_value=0.00, value=3.99, step=0.01, format="%.2f")
 
-    vendor_id = st.text_input("Vendor ID", value="", help="Your vendor identifier for Magento")
-    condition = st.selectbox("Condition", ["New", "Near Mint", "Very Fine", "Fine", "Very Good", "Good", "Fair", "Poor", "Other"])
-    msrp = st.number_input("Suggested Retail Price (MSRP)", min_value=0.00, value=3.99, step=0.01, format="%.2f")
-    barcodes_text = st.text_area(
-        "Barcodes (17 digits each, one per line or comma-separated)",
-        height=150,
-        help="Examples:\n72513025474003041\n76194134274005021,70985301979401111"
-    )
+barcodes_text = st.text_area(
+    "Paste barcodes here (one per line or comma-separated, 17 digits each)",
+    height=120,
+    help="Example: 72513025474003041\n76194134274005021"
+)
 
-    if st.button("Process Barcodes", type="primary"):
-        if not vendor_id.strip():
-            st.error("Vendor ID is required.")
-            return
-        if not barcodes_text.strip():
-            st.error("Please enter at least one barcode.")
-            return
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame(columns=[
+        "barcode", "title", "issue_number", "variant", "printing",
+        "publisher", "image_url", "condition", "msrp", "current_value", "notes"
+    ])
 
-        # Clean and collect valid 17-digit barcodes
+if st.button("Load / Refresh Barcodes"):
+    if not barcodes_text.strip():
+        st.error("Enter at least one barcode.")
+    else:
         barcodes = []
-        for part in barcodes_text.replace(",", " ").split():
+        for part in barcodes_text.replace(",", "\n").splitlines():
             cleaned = part.strip()
             if cleaned.isdigit() and len(cleaned) == 17:
                 barcodes.append(cleaned)
+            elif cleaned:
+                st.warning(f"Ignored invalid: {cleaned}")
 
-        if not barcodes:
-            st.error("No valid 17-digit barcodes found.")
-            return
+        if barcodes:
+            new_rows = []
+            with st.spinner(f"Looking up {len(barcodes)} barcodes..."):
+                for bc in barcodes:
+                    issue, var, print_ = parse_supplement(bc)
+                    data = lookup_comic(bc)
+                    title = data['title'] if data else "Manual entry needed"
+                    pub = data['publisher'] if data else "N/A"
+                    img = data['image_url'] if data else "N/A"
 
-        st.info(f"Processing {len(barcodes)} barcode(s)...")
+                    new_rows.append({
+                        "barcode": bc,
+                        "title": title,
+                        "issue_number": issue,
+                        "variant": var,
+                        "printing": print_,
+                        "publisher": pub,
+                        "image_url": img,
+                        "condition": condition,
+                        "msrp": msrp_default,
+                        "current_value": "N/A",
+                        "notes": get_value_lookup_links(title, issue) if title != "Manual entry needed" else "Check manually"
+                    })
 
-        products = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+            if new_rows:
+                new_df = pd.DataFrame(new_rows)
+                # Append only new barcodes (avoid duplicates)
+                existing_barcodes = st.session_state.df["barcode"].tolist()
+                new_df = new_df[~new_df["barcode"].isin(existing_barcodes)]
+                st.session_state.df = pd.concat([st.session_state.df, new_df], ignore_index=True)
+                st.success(f"Added {len(new_df)} new comics. Total: {len(st.session_state.df)}")
 
-        for i, barcode in enumerate(barcodes):
-            status_text.text(f"Processing {barcode} ({i+1}/{len(barcodes)})")
+st.subheader("Edit Comics Table (fill current_value, fix any missing data)")
 
-            issue_number, variant, printing = parse_supplement(barcode)
-            comic_data = lookup_comic(barcode)
+# Editable table – current_value is number, others text/select as needed
+edited_df = st.data_editor(
+    st.session_state.df,
+    column_config={
+        "current_value": st.column_config.NumberColumn(
+            "Current Value ($)", min_value=0.0, format="%.2f", required=True
+        ),
+        "condition": st.column_config.SelectboxColumn(
+            "Condition", options=["New", "Near Mint", "Very Fine", "Fine", "Very Good", "Good", "Fair", "Poor", "Other"]
+        ),
+        "msrp": st.column_config.NumberColumn("MSRP ($)", min_value=0.0, format="%.2f"),
+        "notes": st.column_config.TextColumn("Value Check Links / Notes", width="medium")
+    },
+    num_rows="dynamic",
+    use_container_width=True,
+    hide_index=False,
+    key="comic_editor"
+)
 
-            if not comic_data:
-                st.warning(f"No data found for barcode {barcode} (base UPC: {barcode[:12]})")
-                manual_title = st.text_input(f"Enter title manually for {barcode} (or leave blank to skip):", key=f"manual_{i}")
-                if not manual_title.strip():
-                    continue
-                comic_data = {
-                    'title': manual_title,
-                    'description': "N/A",
-                    'publisher': "N/A",
-                    'image_url': "N/A"
-                }
+# Update session state with edits
+if edited_df is not None:
+    st.session_state.df = edited_df
 
-            title = comic_data['title']
-            description = comic_data['description']
-            publisher = comic_data['publisher']
-            image_url = comic_data['image_url']
+if st.button("Generate Magento CSV"):
+    if st.session_state.df.empty:
+        st.error("No comics in table.")
+    else:
+        df_export = st.session_state.df.copy()
+        # Clean up for CSV
+        df_export = df_export.rename(columns={
+            "barcode": "sku",
+            "title": "name",
+            "image_url": "image_additional",
+            "msrp": "price"
+        })
+        df_export["name"] = df_export.apply(
+            lambda row: f"{row['name']} #{row['issue_number']}" if row['issue_number'] != "N/A" else row['name'],
+            axis=1
+        )
+        # Add any missing required columns
+        for col in ["description", "cover_date", "creators"]:
+            if col not in df_export:
+                df_export[col] = "N/A"
 
-            current_value = get_current_value(title, issue_number)
+        output = io.StringIO()
+        fieldnames = ["name", "sku", "description", "image_additional", "price", "current_value",
+                      "condition", "vendor_id", "publisher", "cover_date", "creators",
+                      "issue_number", "variant", "printing"]
+        # Fill vendor_id
+        df_export["vendor_id"] = vendor_id
 
-            product = {
-                "name": f"{title} #{issue_number}" if issue_number != "N/A" else title,
-                "sku": barcode,
-                "description": description,
-                "image_additional": image_url,
-                "price": msrp,
-                "current_value": current_value,
-                "condition": condition,
-                "vendor_id": vendor_id,
-                "publisher": publisher,
-                "cover_date": "N/A",
-                "creators": "N/A",
-                "issue_number": issue_number,
-                "variant": variant,
-                "printing": printing
-            }
-            products.append(product)
+        writer = csv.DictWriter(output, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+        writer.writeheader()
+        for _, row in df_export.iterrows():
+            writer.writerow(row.to_dict())
 
-            progress_bar.progress((i + 1) / len(barcodes))
+        csv_data = output.getvalue().encode('utf-8')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"comics_import_{vendor_id or 'batch'}_{timestamp}.csv"
 
-        status_text.text(f"Processing complete! {len(products)} comics ready.")
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv_data,
+            file_name=filename,
+            mime="text/csv"
+        )
+        st.success("CSV ready!")
 
-        if products:
-            output = io.StringIO()
-            fieldnames = [
-                "name", "sku", "description", "image_additional", "price", "current_value",
-                "condition", "vendor_id", "publisher", "cover_date", "creators",
-                "issue_number", "variant", "printing"
-            ]
-
-            writer = csv.DictWriter(output, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
-            writer.writeheader()
-            writer.writerows(products)
-
-            csv_data = output.getvalue().encode('utf-8')
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"comics_import_{vendor_id}_{timestamp}.csv"
-
-            st.download_button(
-                label="📥 Download CSV for Magento",
-                data=csv_data,
-                file_name=filename,
-                mime="text/csv",
-                help="Upload in Magento: System → Data Transfer → Import"
-            )
-            st.success(f"CSV generated with {len(products)} items!")
-
-if __name__ == "__main__":
-    main()
+st.caption("Tip: Edit directly in the table. Use the links in 'notes' to check values quickly.")
