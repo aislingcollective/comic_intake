@@ -4,11 +4,8 @@ import csv
 from datetime import datetime
 import io
 
-# Replace with your actual ComicVine API key
-COMICVINE_API_KEY = "da58407c48328439ae1c16418b4358165a9c1f3f"  # ← Put your key here
-
-# Optional: For better security later, move to Streamlit secrets:
-# comicvine_api_key = st.secrets["comicvine_api_key"]
+# No API key needed for free tier (100 calls/day)
+UPCITEMDB_BASE_URL = "https://api.upcitemdb.com/prod/trial"
 
 def parse_supplement(full_barcode):
     """Parse the 5-digit supplement: issue (3 digits), variant (1), printing (1)"""
@@ -21,64 +18,44 @@ def parse_supplement(full_barcode):
     return "N/A", "N/A", "N/A"
 
 def lookup_comic(barcode):
-    """Search ComicVine by UPC/barcode and get issue details"""
-    if not COMICVINE_API_KEY or COMICVINE_API_KEY == "YOUR_COMICVINE_API_KEY_HERE":
-        st.error("Please set your ComicVine API key in the code.")
-        return None
-
-    search_url = f"https://comicvine.gamespot.com/api/search/?api_key={COMICVINE_API_KEY}&format=json&query={barcode}&resources=issue&limit=1"
-    headers = {"User-Agent": "ComicIntakeApp/1.0"}
-    
+    """Lookup by barcode using UPCitemdb (free tier)"""
     try:
-        response = requests.get(search_url, headers=headers, timeout=10)
+        response = requests.get(f"{UPCITEMDB_BASE_URL}/lookup?upc={barcode}", timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        if data.get('number_of_total_results', 0) > 0:
-            issue_id = data['results'][0]['id']
-            detail_url = f"https://comicvine.gamespot.com/api/issue/4000-{issue_id}/?api_key={COMICVINE_API_KEY}&format=json"
-            detail_response = requests.get(detail_url, headers=headers, timeout=10)
-            detail_response.raise_for_status()
-            return detail_response.json()['results']
+        if data.get('code') == 'OK' and data.get('items'):
+            item = data['items'][0]
+            return {
+                'name': item.get('title', "N/A"),
+                'description': item.get('description', "N/A"),
+                'publisher': item.get('brand', "N/A"),  # Often publisher for comics
+                'image_url': item.get('images', ["N/A"])[0],
+                'ean': item.get('ean', "N/A"),
+                'upc': item.get('upc', "N/A"),
+                # Add more fields as needed
+            }
     except Exception as e:
-        st.warning(f"Error looking up barcode {barcode}: {str(e)}")
+        st.warning(f"Error looking up barcode {barcode} with UPCitemdb: {str(e)}")
     return None
 
-def get_current_value(title):
-    """Manual input with helpful site suggestions (no eBay yet)"""
-    st.markdown("""
-    **Quick value check sites (open in a new tab):**
-    - [GoCollect](https://gocollect.com/comics) — search title + issue
-    - [ComicBookRealm](https://comicbookrealm.com/) — free price guide
-    - [ComicsPriceGuide](https://www.comicspriceguide.com/) — free signup for values
-    - [Key Collector Comics](https://www.keycollectorcomics.com/) — good for variants/keys
-    """)
-    
-    value_str = st.text_input(
-        f"Current market value for '{title}' (e.g., 12.50 or N/A)",
-        value="N/A",
-        key=f"value_{title}_{datetime.now().timestamp()}"  # unique key to avoid collisions
-    )
-    try:
-        return float(value_str) if value_str.lower() != "n/a" else "N/A"
-    except ValueError:
-        return "N/A"
+# Keep your get_current_value as-is (manual with sites)
 
 def main():
-    st.title("Comic Barcode Intake App")
+    st.title("Comic Barcode Intake App (Updated with UPC Lookup)")
     st.markdown("""
     Enter comic details below. Barcodes should be **17 digits** (12-digit UPC + 5-digit supplement).  
-    The app fetches data from ComicVine and generates a CSV for Magento import.
+    Now uses UPCitemdb for accurate barcode lookups (free for 100/day).
     """)
 
-    # User inputs
+    # User inputs (same as before)
     vendor_id = st.text_input("Vendor ID", value="", help="Your vendor identifier for Magento")
     condition = st.selectbox("Condition", ["New", "Near Mint", "Very Fine", "Fine", "Very Good", "Good", "Fair", "Poor", "Other"])
     msrp = st.number_input("Suggested Retail Price (MSRP)", min_value=0.00, value=3.99, step=0.01, format="%.2f")
     barcodes_text = st.text_area(
         "Barcodes (one per line or comma-separated, 17 digits each)",
         height=150,
-        help="Example:\n75960620200300111\nor\n75960620200300111,75960620200400121"
+        help="Example:\n72513025474003041\nor\n72513025474003041,76194134274005021"
     )
 
     if st.button("Process Barcodes", type="primary"):
@@ -113,15 +90,19 @@ def main():
             comic_data = lookup_comic(barcode)
 
             if not comic_data:
-                st.warning(f"No ComicVine data for {barcode}. Skipping.")
-                continue
+                st.warning(f"No data for {barcode}. Enter manually?")
+                manual_title = st.text_input(f"Title for {barcode}:", key=f"manual_title_{i}")
+                if manual_title:
+                    comic_data = {'name': manual_title, 'description': "N/A", 'publisher': "N/A", 'image_url': "N/A"}
+                else:
+                    continue
 
-            title = comic_data.get('name', "Unknown Title")
-            description = comic_data.get('description', "No description available.")
-            publisher = comic_data.get('volume', {}).get('publisher', {}).get('name', "N/A")
-            cover_date = comic_data.get('cover_date', "N/A")
-            creators = ", ".join([c['name'] for c in comic_data.get('person_credits', []) if c.get('name')])
-            image_url = comic_data.get('image', {}).get('super_url', "N/A") or comic_data.get('image', {}).get('original_url', "N/A")
+            title = comic_data.get('name', "N/A")
+            description = comic_data.get('description', "N/A")
+            publisher = comic_data.get('publisher', "N/A")
+            image_url = comic_data.get('image_url', "N/A")
+            cover_date = "N/A"  # UPCitemdb may not have this; add manual if needed
+            creators = "N/A"    # Same
 
             current_value = get_current_value(title)
 
@@ -148,7 +129,7 @@ def main():
         status_text.text(f"Done! Processed {len(products)} comics successfully.")
 
         if products:
-            # Create CSV in memory
+            # Create CSV in memory (same as before)
             output = io.StringIO()
             fieldnames = ["name", "sku", "description", "image_additional", "price", "current_value", 
                           "condition", "vendor_id", "publisher", "cover_date", "creators", 
