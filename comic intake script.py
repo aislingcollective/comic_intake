@@ -1,0 +1,98 @@
+import requests
+import json
+import csv
+from datetime import datetime
+
+# API keys (replace with yours)
+COMICVINE_API_KEY = "da58407c48328439ae1c16418b4358165a9c1f3f"  # Required
+EBAY_APP_KEY = "YOUR_EBAY_APP_KEY"  # Optional for auto current value
+
+# Function to parse supplement from full barcode
+def parse_supplement(full_barcode):
+    if len(full_barcode) == 17:
+        supplement = full_barcode[-5:]
+        issue_number = supplement[:3]
+        variant = supplement[3]
+        printing = supplement[4]
+        return issue_number, variant, printing
+    return "N/A", "N/A", "N/A"
+
+# Function to lookup comic by barcode using ComicVine search
+def lookup_comic(barcode):
+    search_url = f"https://comicvine.gamespot.com/api/search/?api_key={COMICVINE_API_KEY}&format=json&query={barcode}&resources=issue&limit=1"
+    response = requests.get(search_url, headers={"User-Agent": "ComicIntakeApp"})
+    if response.status_code != 200:
+        return None
+    data = response.json()
+    if data['number_of_total_results'] > 0:
+        issue_id = data['results'][0]['id']
+        detail_url = f"https://comicvine.gamespot.com/api/issue/4000-{issue_id}/?api_key={COMICVINE_API_KEY}&format=json"
+        detail_response = requests.get(detail_url, headers={"User-Agent": "ComicIntakeApp"})
+        if detail_response.status_code == 200:
+            return detail_response.json()['results']
+    return None
+
+# Function to get current value (fallback to manual with site suggestions)
+def get_current_value(title):
+    print("\nQuick value check sites (open in browser):")
+    print("- GoCollect: https://gocollect.com/comics (search title + issue)")
+    print("- ComicBookRealm: https://comicbookrealm.com/ (free price guide)")
+    print("- ComicsPriceGuide: https://www.comicspriceguide.com/ (free signup for values)")
+    print("- Key Collector: https://www.keycollectorcomics.com/ (ranges for keys/variants)")
+    print(f"\nFor '{title}', check recent solds or estimates above.")
+    return input("Enter current market value (or 'N/A'): ") or "N/A"
+
+# Main app logic
+def main():
+    vendor_id = input("Enter vendor ID: ")
+    condition = input("Enter condition (e.g., New, Used): ")
+    barcodes = input("Enter full barcodes (17 digits each, comma-separated for batch): ").split(",")
+    msrp = input("Enter suggested retail price (MSRP): ")
+
+    products = []
+    for barcode in barcodes:
+        barcode = barcode.strip()
+        issue_number, variant, printing = parse_supplement(barcode)
+        comic_data = lookup_comic(barcode)
+        if not comic_data:
+            print(f"No data found for barcode {barcode}. Skipping.")
+            continue
+
+        title = comic_data.get('name', "N/A")
+        description = comic_data.get('description', "N/A")
+        publisher = comic_data['volume'].get('publisher', {}).get('name', "N/A") if 'volume' in comic_data else "N/A"
+        cover_date = comic_data.get('cover_date', "N/A")
+        creators = ", ".join([person['name'] for person in comic_data.get('person_credits', [])])
+        image_url = comic_data['image'].get('super_url', "N/A")
+        current_value = get_current_value(title)
+
+        product = {
+            "name": title,
+            "sku": barcode,  # Use barcode as SKU
+            "description": description,
+            "image_additional": image_url,
+            "price": msrp,
+            "current_value": current_value,
+            "condition": condition,
+            "vendor_id": vendor_id,
+            "publisher": publisher,
+            "cover_date": cover_date,
+            "creators": creators,
+            "issue_number": issue_number,
+            "variant": variant,
+            "printing": printing
+        }
+        products.append(product)
+
+    if products:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"comics_import_{vendor_id}_{timestamp}.csv"
+        with open(filename, 'w', newline='') as csvfile:
+            fieldnames = ["name", "sku", "description", "image_additional", "price", "current_value", "condition", "vendor_id", "publisher", "cover_date", "creators", "issue_number", "variant", "printing"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(products)
+        print(f"CSV saved as {filename}. Upload to Magento via Data Transfer > Import.")
+
+if __name__ == "__main__":
+    main()
