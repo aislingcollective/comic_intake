@@ -40,12 +40,14 @@ vendor_id = st.text_input(
     placeholder="Enter Vendor or Customer ID Number",
     help="This will be part of the downloaded CSV filename"
 )
+
 condition = st.selectbox(
     "Comic Condition (applies to all in this batch)",
     options=["New", "Used", "Vintage", "Rescue", "Artisan Supply"],
     index=0,
     help="This will appear in a new 'Condition' column for every comic"
 )
+
 barcodes_text = st.text_area(
     "Barcodes (one per line, dashes/spaces OK):",
     height=180,
@@ -55,7 +57,7 @@ barcodes_text = st.text_area(
 def get_cover_url_from_upc(item: dict) -> str:
     images = item.get("images", [])
     if images:
-        return images[0]
+        return images[0].strip()
     return ""
 
 if st.button("Fetch Comic Details", type="primary"):
@@ -105,7 +107,6 @@ if st.button("Fetch Comic Details", type="primary"):
                         upc_url = f"{UPC_BASE_URL}lookup?upc={base_upc}"
                         resp_upc = requests.get(upc_url, timeout=10)
                     resp_upc.raise_for_status()
-
                     data_upc = resp_upc.json()
                     items = data_upc.get("items", [])
                     if not items:
@@ -116,6 +117,7 @@ if st.button("Fetch Comic Details", type="primary"):
                     title_from_upc = item.get("title", "") or item.get("description", "") or "Unknown Title"
                     desc_upc = item.get("description", "")
                     image_upc = get_cover_url_from_upc(item)
+
                     msrp = 0.0
                     offers = item.get("offers", [])
                     if offers:
@@ -130,9 +132,9 @@ if st.button("Fetch Comic Details", type="primary"):
                     if variant != "Main":
                         search_query += f" {variant.lower()}"
                     if not search_query.strip():
-                        search_query = title_from_upc  # fallback
-
+                        search_query = title_from_upc
                     query_encoded = quote(search_query)
+
                     cv_search_url = f"{COMICVINE_BASE_URL}search/?api_key={COMICVINE_KEY}&format=json&query={query_encoded}&resources=issue&limit=3"
                     resp_cv_search = requests.get(cv_search_url, headers=headers_cv, timeout=10)
                     resp_cv_search.raise_for_status()
@@ -142,40 +144,70 @@ if st.button("Fetch Comic Details", type="primary"):
                         missing.append(f"{full_barcode} (no Comic Vine match)")
                         continue
 
-                    # Take first result (or could add logic to pick best match by issue_number)
+                    # Take first result
                     result = data_cv["results"][0]
                     detail_url = f"{result['api_detail_url']}?api_key={COMICVINE_KEY}&format=json"
                     resp_detail = requests.get(detail_url, headers=headers_cv, timeout=10)
                     resp_detail.raise_for_status()
                     detail = resp_detail.json()["results"]
 
-                    # Comic Vine data
-                    full_title = detail.get("name", title_from_upc)
-                    series = detail.get("volume", {}).get("name", "")
-                    cv_issue_num = detail.get("issue_number", issue_num)
-                    publish_date = detail.get("cover_date", "")
-                    description = detail.get("description", desc_upc) or ""
-                    image_url = detail.get("image", {}).get("original_url", image_upc)
-                    creators_list = [c.get("name", "") for c in detail.get("person_credits", [])]
-                    creators = "; ".join([c for c in creators_list if c])
+                    # ── Extract & construct better fields ──
+                    series_name = detail.get("volume", {}).get("name", "").strip()
+                    issue_num_cv = detail.get("issue_number", "")
+                    subtitle = detail.get("name", "").strip()
+                    cover_date = detail.get("cover_date", "")
+
+                    # Construct full title
+                    if subtitle and subtitle.lower() != series_name.lower() and subtitle.lower() != "one-shot":
+                        full_title = f"{series_name} #{issue_num_cv} - {subtitle}" if issue_num_cv else f"{series_name} - {subtitle}"
+                    elif series_name and issue_num_cv:
+                        full_title = f"{series_name} #{issue_num_cv}"
+                    else:
+                        full_title = series_name or title_from_upc or "Unknown Title"
+
+                    # Split creators by role
+                    person_credits = detail.get("person_credits", [])
+                    writers = []
+                    artists = []
+                    for credit in person_credits:
+                        name = credit.get("person", {}).get("name", "").strip()
+                        role = credit.get("role", "").lower().strip()
+                        if name:
+                            if any(kw in role for kw in ["writer", "story", "script"]):
+                                writers.append(name)
+                            elif any(kw in role for kw in ["art", "penciler", "inker", "artist", "pencils", "colors", "letterer", "cover"]):
+                                artists.append(name)
+
+                    # Image: UPC first (better for website), then Comic Vine
+                    image_url = (
+                        image_upc or
+                        detail.get("image", {}).get("original_url") or
+                        detail.get("image", {}).get("medium_url") or
+                        detail.get("image", {}).get("small_url") or
+                        ""
+                    )
+
                     publisher = detail.get("volume", {}).get("publisher", {}).get("name", item.get("brand", ""))
 
                     row = {
                         "Full Title": full_title,
                         "Barcode": full_barcode,
-                        "Series": series,
-                        "Issue Number": cv_issue_num or issue_num,
+                        "Series": series_name,
+                        "Issue Number": issue_num_cv or issue_num,
                         "Publisher": publisher,
-                        "Publish Date": publish_date,
-                        "Creators": creators,
-                        "Description": description.strip(),
+                        "Release Date": cover_date,  # renamed
+                        "Writer(s)": "; ".join(set(writers)) if writers else "",
+                        "Artist(s)": "; ".join(set(artists)) if artists else "",
+                        "Description": (detail.get("description") or desc_upc or "").strip(),
                         "Image URL": image_url,
                         "Extracted Issue #": issue_num,
                         "Variant": variant,
                         "Print #": print_num,
                         "Condition": condition,
+                        "Recorded Price (UPC)": f"${msrp:.2f}" if msrp > 0 else "",
                     }
 
+                    # Suggested price logic
                     suggested_price = ""
                     if condition == "New":
                         suggested_price = msrp
