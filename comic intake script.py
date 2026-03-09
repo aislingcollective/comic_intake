@@ -6,13 +6,13 @@ from urllib.parse import quote
 import time
 
 # ── CONFIG ──
-COMICVINE_KEY = st.secrets["COMICVINE_KEY"]  # Set in Streamlit secrets
-UPCDATABASE_KEY = st.secrets.get("UPCDATABASE_KEY", "")  # Add this to secrets! Get from upcdatabase.org/apikeys
-UPC_BASE_URL = "https://api.upcdatabase.org/product/"   # New endpoint
+COMICVINE_KEY = st.secrets["COMICVINE_KEY"]
+GOUPC_KEY = st.secrets.get("GOUPC_KEY", "")  # Add your Go-UPC trial key here in secrets!
+UPC_BASE_URL = "https://go-upc.com/api/v1/code/"  # New endpoint
 COMICVINE_BASE_URL = "https://comicvine.gamespot.com/api/"
 PASSWORD = "Y0uareappreciated!"  # CHANGE THIS
 
-# ── Session State ── (unchanged)
+# ── Session State ──
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
@@ -31,50 +31,39 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ── MAIN APP ── (mostly unchanged)
+# ── MAIN APP ──
 st.set_page_config(page_title="Barcode Retrieval for Comics Intake", layout="wide")
 st.title("Barcode Retrieval for Comics Intake")
-st.markdown("Internal use only. Now using upcdatabase.org for initial UPC lookup (free tier: ~100/day).")
+st.markdown("Now using Go-UPC for initial barcode lookup (request free trial key at https://go-upc.com/plans/api/trial). Enriches via Comic Vine.")
 
 vendor_id = st.text_input("Vendor ID / Customer ID", placeholder="Enter Vendor or Customer ID Number", help="...")
 condition = st.selectbox("Comic Condition...", options=["New", "Used", "Vintage", "Rescue", "Artisan Supply"], index=0, help="...")
-barcodes_text = st.text_area("Barcodes (one per line...)", height=180, placeholder="...")
-
-def get_cover_url_from_response(data: dict) -> str:
-    # upcdatabase.org may have 'image' or similar; fallback to empty or add if you see field in responses
-    return data.get("image", "") or ""  # Adjust key after testing real response
+barcodes_text = st.text_area("Barcodes (one per line, dashes/spaces OK):", height=180, placeholder="72513025474003041\n...")
 
 if st.button("Fetch Comic Details", type="primary"):
     if not barcodes_text.strip():
         st.warning("Please enter at least one barcode.")
-    elif not UPCDATABASE_KEY:
-        st.error("UPCDATABASE_KEY not set in Streamlit secrets! Sign up at upcdatabase.org/signup, get token at /apikeys, add to secrets.")
+    elif not GOUPC_KEY:
+        st.error("GOUPC_KEY not set in Streamlit secrets! Request free trial at https://go-upc.com/plans/api/trial, then add key.")
     else:
-        with st.spinner("Querying UPC Database → Comic Vine..."):
+        with st.spinner("Querying Go-UPC → Comic Vine..."):
             barcode_tuples = []
             for line in barcodes_text.splitlines():
                 cleaned = line.strip().replace("-", "").replace(" ", "")
                 if not cleaned or not cleaned.isdigit():
                     continue
                 original = cleaned
-                if len(cleaned) == 17:
-                    base_upc = cleaned[:12]
-                    supplement = cleaned[12:]
-                elif len(cleaned) == 12:
-                    base_upc = cleaned
-                    supplement = ""
-                else:
-                    continue
+                base_upc = cleaned[:12] if len(cleaned) >= 12 else cleaned
+                supplement = cleaned[12:] if len(cleaned) > 12 else ""
                 barcode_tuples.append((original, base_upc, supplement))
 
             results = []
             missing = []
             headers_cv = {"User-Agent": "StreamlitComicApp/1.0"}
-            headers_upc = {"Authorization": f"Bearer {UPCDATABASE_KEY}"}  # Preferred Bearer method
+            headers_goupc = {"Authorization": f"Bearer {GOUPC_KEY}"}
 
             for full_barcode, base_upc, supplement in barcode_tuples:
                 try:
-                    # Parse supplement (unchanged)
                     issue_num = ""
                     variant = "Main"
                     print_num = "1"
@@ -86,32 +75,31 @@ if st.button("Fetch Comic Details", type="primary"):
                             variant = f"Cover {var_digit}"
                         print_num = supplement[4]
 
-                    # UPC Database lookup (try full 17-digit first, fallback to 12)
+                    # Go-UPC lookup: try full, then base
                     upc_to_use = full_barcode if len(full_barcode) > 12 else base_upc
                     upc_url = f"{UPC_BASE_URL}{upc_to_use}"
-                    resp_upc = requests.get(upc_url, headers=headers_upc, timeout=10)
-                    time.sleep(1)  # Gentle pace for free tier
+                    resp_upc = requests.get(upc_url, headers=headers_goupc, timeout=10)
+                    time.sleep(1)  # Polite rate
 
                     if resp_upc.status_code != 200:
-                        # Try base if full failed
                         upc_url = f"{UPC_BASE_URL}{base_upc}"
-                        resp_upc = requests.get(upc_url, headers=headers_upc, timeout=10)
+                        resp_upc = requests.get(upc_url, headers=headers_goupc, timeout=10)
                         time.sleep(1)
 
                     resp_upc.raise_for_status()
                     data_upc = resp_upc.json()
 
-                    if not data_upc.get("success", True):  # Check for error/success key
-                        missing.append(f"{full_barcode} (UPC DB: {data_upc.get('error', {}).get('message', 'No data')})")
+                    if "error" in data_upc:
+                        missing.append(f"{full_barcode} (Go-UPC: {data_upc.get('error', 'No data')})")
                         continue
 
-                    # Extract fields — adjust keys after you test a real comic UPC!
                     title_from_upc = data_upc.get("name", "") or data_upc.get("description", "") or "Unknown Title"
                     desc_upc = data_upc.get("description", "")
-                    image_upc = get_cover_url_from_response(data_upc)
-                    msrp = float(data_upc.get("price", 0) or 0)  # May not always exist; fallback to 0
+                    image_upc = data_upc.get("image_url", "") or ""  # Confirm field name after test
 
-                    # Rest of logic (Comic Vine search/enrich) unchanged from previous version
+                    msrp = float(data_upc.get("price", 0) or 0)  # May vary; fallback 0
+
+                    # Comic Vine enrichment (unchanged)
                     search_query = title_from_upc.strip()
                     if issue_num:
                         search_query += f" #{issue_num}"
@@ -134,7 +122,6 @@ if st.button("Fetch Comic Details", type="primary"):
                     resp_detail.raise_for_status()
                     detail = resp_detail.json()["results"]
 
-                    # ── Extract fields (unchanged) ──
                     series_name = detail.get("volume", {}).get("name", "").strip()
                     issue_num_cv = detail.get("issue_number", "")
                     subtitle = detail.get("name", "").strip()
@@ -201,7 +188,6 @@ if st.button("Fetch Comic Details", type="primary"):
                 except Exception as e:
                     missing.append(f"{full_barcode} (error: {str(e)})")
 
-            # Display results, CSV download, image previews (unchanged from previous)
             if results:
                 df = pd.DataFrame(results)
                 st.success(f"Found details for {len(results)} comics")
