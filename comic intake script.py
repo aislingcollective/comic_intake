@@ -56,8 +56,9 @@ barcodes_text = st.text_area(
 
 def get_cover_url_from_upc(item: dict) -> str:
     images = item.get("images", [])
-    if images:
-        return images[0].strip()
+    for img in images:
+        if isinstance(img, str) and img.strip():  # skip None, empty, or non-string
+            return img.strip()
     return ""
 
 if st.button("Fetch Comic Details", type="primary"):
