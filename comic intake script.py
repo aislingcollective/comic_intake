@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import datetime
 from urllib.parse import quote
+import time
 
 # ── CONFIG ──
 COMICVINE_KEY = st.secrets["COMICVINE_KEY"]  # Set this in Streamlit Cloud secrets
@@ -57,7 +58,7 @@ barcodes_text = st.text_area(
 def get_cover_url_from_upc(item: dict) -> str:
     images = item.get("images", [])
     for img in images:
-        if isinstance(img, str) and img.strip():  # skip None, empty, or non-string
+        if isinstance(img, str) and img.strip():
             return img.strip()
     return ""
 
@@ -104,9 +105,13 @@ if st.button("Fetch Comic Details", type="primary"):
                     # Try UPC lookup: full first, then base
                     upc_url = f"{UPC_BASE_URL}lookup?upc={full_barcode}"
                     resp_upc = requests.get(upc_url, timeout=10)
+                    time.sleep(2)  # Prevent burst rate limiting
+
                     if resp_upc.status_code != 200:
                         upc_url = f"{UPC_BASE_URL}lookup?upc={base_upc}"
                         resp_upc = requests.get(upc_url, timeout=10)
+                        time.sleep(2)  # Prevent burst rate limiting
+
                     resp_upc.raise_for_status()
                     data_upc = resp_upc.json()
                     items = data_upc.get("items", [])
@@ -196,7 +201,7 @@ if st.button("Fetch Comic Details", type="primary"):
                         "Series": series_name,
                         "Issue Number": issue_num_cv or issue_num,
                         "Publisher": publisher,
-                        "Release Date": cover_date,  # renamed
+                        "Release Date": cover_date,
                         "Writer(s)": "; ".join(set(writers)) if writers else "",
                         "Artist(s)": "; ".join(set(artists)) if artists else "",
                         "Description": (detail.get("description") or desc_upc or "").strip(),
